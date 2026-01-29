@@ -38,8 +38,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 将当前脚�
 from phone_agent import PhoneAgent  # 导入PhoneAgent核心类，用于执行任务
 from phone_agent.model import ModelConfig  # 导入模型配置类，配置模型相关参数
 from phone_agent.agent import AgentConfig  # 导入代理配置类，配置代理行为（如最大步骤等）
-# 注释掉dashscope相关导入，避免缺少依赖时报错
-# from ASR_DashScope import transcribe as asr_transcribe  # 导入ASR转写函数，并重命名为asr_transcribe
+# 导入ASR转写函数
+from ASR_DashScope import transcribe as asr_transcribe  # 导入ASR转写函数，并重命名为asr_transcribe
 
 # 配置日志记录
 logging.basicConfig(level=logging.INFO)  # 设置日志级别为INFO
@@ -216,8 +216,160 @@ class TaskHandler(BaseHTTPRequestHandler):
             except Exception as e:  # 其他运行时错误
                 logger.error(f"Error executing task: {str(e)}", exc_info=True)  # 记录异常堆栈
                 self._send_response(500, {'error': 'Internal server error', 'details': str(e)})  # 返回500错误与异常信息
-        elif parsed_path.path == '/asr/transcribe':  # 语音识别端点
-            self._send_response(404, {'error': 'ASR功能暂时不可用'})
+        elif parsed_path.path == '/asr':  # 语音识别+agent调用端点
+            # 限制请求体大小（音频文件可能较大，设置为10MB）
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 10 * 1024 * 1024:  # 限制为10MB
+                self._send_response(413, {'error': 'Request entity too large. Max 10MB allowed.'})
+                return
+            
+            # 读取POST主体
+            post_data = self.rfile.read(content_length)
+            
+            try:
+                # 解析JSON数据
+                data = json.loads(post_data.decode('utf-8'))
+                
+                # 支持两种输入方式：
+                # 1. audio_url: 音频文件的公网URL
+                # 2. audio_base64: Base64编码的音频数据
+                audio_url = data.get('audio_url')
+                audio_base64 = data.get('audio_base64')
+                audio_format = data.get('audio_format', 'wav')  # 默认wav格式
+                
+                if not audio_url and not audio_base64:
+                    self._send_response(400, {'error': 'Missing audio_url or audio_base64 field'})
+                    return
+                
+                logger.info("Received ASR request")
+                
+                # 处理音频并调用ASR
+                asr_result = None
+                
+                if audio_url:
+                    # 使用URL方式调用ASR
+                    logger.info(f"Processing audio from URL: {audio_url}")
+                    asr_result = asr_transcribe(file_urls=[audio_url])
+                
+                elif audio_base64:
+                    # 使用Base64数据方式
+                    logger.info("Processing audio from base64 data")
+                    
+                    # 解码Base64数据
+                    try:
+                        audio_data = base64.b64decode(audio_base64)
+                    except Exception as e:
+                        self._send_response(400, {'error': f'Invalid base64 data: {str(e)}'})
+                        return
+                    
+                    # 保存为临时文件
+                    import tempfile
+                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{audio_format}')
+                    temp_file_path = temp_file.name
+                    try:
+                        temp_file.write(audio_data)
+                        temp_file.close()
+                        
+                        # 使用本地文件路径调用ASR
+                        asr_result = asr_transcribe(file_paths=[temp_file_path])
+                    finally:
+                        # 清理临时文件
+                        try:
+                            os.unlink(temp_file_path)
+                        except:
+                            pass
+                
+                # 检查ASR结果
+                if not asr_result or not asr_result.get('success'):
+                    error_msg = asr_result.get('error', 'ASR转写失败') if asr_result else 'ASR转写失败'
+                    error_details = asr_result.get('details', '') if asr_result else ''
+                    self._send_response(500, {
+                        'error': error_msg,
+                        'details': error_details
+                    })
+                    return
+                
+                # 提取转写文本
+                asr_output = asr_result.get('output', {})
+                
+                # DashScope ASR返回的结果结构可能是：
+                # {
+                #   "results": [
+                #     {
+                #       "transcription_url": "...",
+                #       "transcription": {
+                #         "sentences": [{"text": "识别的文本"}]
+                #       }
+                #     }
+                #   ]
+                # }
+                transcribed_text = ""
+                
+                # 尝试提取文本
+                if hasattr(asr_output, 'results') and asr_output.results:
+                    for result in asr_output.results:
+                        if hasattr(result, 'transcription') and result.transcription:
+                            transcription = result.transcription
+                            if hasattr(transcription, 'sentences') and transcription.sentences:
+                                for sentence in transcription.sentences:
+                                    if hasattr(sentence, 'text'):
+                                        transcribed_text += sentence.text + " "
+                
+                # 如果为字典类型，尝试另一种解析方式
+                if isinstance(asr_output, dict):
+                    results = asr_output.get('results', [])
+                    for result in results:
+                        transcription = result.get('transcription', {})
+                        sentences = transcription.get('sentences', [])
+                        for sentence in sentences:
+                            transcribed_text += sentence.get('text', '') + " "
+                
+                transcribed_text = transcribed_text.strip()
+                
+                if not transcribed_text:
+                    self._send_response(500, {
+                        'error': 'ASR返回结果为空或无法解析',
+                        'asr_output': str(asr_output)
+                    })
+                    return
+                
+                logger.info(f"ASR transcription: {transcribed_text}")
+                
+                # 初始化agent（如果尚未初始化）
+                if TaskHandler.agent is None:
+                    logger.info("Initializing PhoneAgent...")
+                    
+                    TaskHandler.model_config = ModelConfig(
+                        base_url=os.getenv("PHONE_AGENT_BASE_URL", "http://localhost:8000/v1"),
+                        model_name=os.getenv("PHONE_AGENT_MODEL", "autoglm-phone-9b"),
+                        api_key=os.getenv("PHONE_AGENT_API_KEY", "EMPTY")
+                    )
+                    
+                    TaskHandler.agent_config = AgentConfig(
+                        max_steps=int(os.getenv("PHONE_AGENT_MAX_STEPS", "100")),
+                        lang=os.getenv("PHONE_AGENT_LANG", "cn")
+                    )
+                    
+                    TaskHandler.agent = PhoneAgent(TaskHandler.model_config, TaskHandler.agent_config)
+                    logger.info("PhoneAgent initialized successfully.")
+                
+                # 使用转写的文本作为任务调用agent
+                agent_result = self._execute_task(transcribed_text)
+                
+                # 返回完整结果
+                response = {
+                    'success': True,
+                    'transcribed_text': transcribed_text,
+                    'agent_result': agent_result
+                }
+                
+                self._send_response(200, response)
+                
+            except json.JSONDecodeError:
+                self._send_response(400, {'error': 'Invalid JSON in request'})
+            except Exception as e:
+                logger.error(f"Error processing ASR request: {str(e)}", exc_info=True)
+                self._send_response(500, {'error': 'Internal server error', 'details': str(e)})
         else:
             self._send_response(404, {'error': 'Endpoint not found'})  # 未匹配到路径，返回404
     
@@ -280,9 +432,17 @@ def main():
     httpd = HTTPServer(server_address, TaskHandler)  # 创建HTTPServer实例，指定请求处理类TaskHandler
     
     print(f"Starting HTTP server on {args.host}:{args.port}")  # 控制台输出服务器启动信息
-    print(f"POST to http://{args.host}:{args.port}/task to send tasks")  # 提示任务端点路径
-    print(f"GET to http://{args.host}:{args.port}/task/<task_description> to send tasks via URL")  # 提示新的URL方式
-    print("Example: curl -X GET http://localhost:5000/task/open%20calculator")  # 示例GET命令
+    print(f"\nAvailable endpoints:")
+    print(f"  1. POST to http://{args.host}:{args.port}/task - Send task directly")
+    print(f"     Example: curl -X POST http://{args.host}:{args.port}/task -H 'Content-Type: application/json' -d '{{\"task\":\"打开计算器\"}}'")
+    print(f"\n  2. GET to http://{args.host}:{args.port}/task/<task_description> - Send task via URL")
+    print(f"     Example: curl http://{args.host}:{args.port}/task/打开计算器")
+    print(f"\n  3. POST to http://{args.host}:{args.port}/asr - Send audio for ASR + agent")
+    print(f"     Example with URL:")
+    print(f"       curl -X POST http://{args.host}:{args.port}/asr -H 'Content-Type: application/json' -d '{{\"audio_url\":\"https://example.com/audio.wav\"}}'")
+    print(f"     Example with base64:")
+    print(f"       curl -X POST http://{args.host}:{args.port}/asr -H 'Content-Type: application/json' -d '{{\"audio_base64\":\"<base64_data>\",\"audio_format\":\"wav\"}}'")
+    print()
     
     try:
         # 开始服务请求
