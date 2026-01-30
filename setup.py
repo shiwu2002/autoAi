@@ -23,15 +23,20 @@ setup(
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Topic :: Software Development :: Libraries :: Python Modules",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
-    python_requires=">=3.10",
+    python_requires=">=3.8",
     install_requires=[
         "Pillow>=12.0.0",
         "openai>=2.9.0",
+        "dashscope>=1.25.0",
+        "adbutils>=1.2.5",
+        "pure-python-adb>=0.3.0",
+        "requests>=2.25.0",
+        "transformers>=5.0.0rc0",
     ],
     extras_require={
         "dev": [
@@ -40,6 +45,10 @@ setup(
             "mypy>=1.0.0",
             "ruff>=0.1.0",
         ],
+        "deploy": [
+            "sglang>=0.5.6.post1",
+            "vllm>=0.12.0",
+        ]
     },
     entry_points={
         "console_scripts": [

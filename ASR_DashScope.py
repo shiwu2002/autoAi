@@ -51,8 +51,8 @@ def transcribe(file_urls=None, file_paths=None):  # 定义转写函数，支持�
             
             try:  # 尝试以本地文件路径方式调用SDK
                 task_response = Transcription.async_call(  # 提交异步任务
-                    model="fun-asr-mtl",  # 指定ASR模型
-                    file_paths=file_paths  # 传入本地文件路径列表
+                    model="paraformer-v2",  # 使用支持本地文件的模型
+                    file_urls=file_paths  # DashScope SDK统一使用file_urls参数，本地文件也用此参数
                 )
                 transcribe_response = Transcription.wait(task=task_response.output.task_id)  # 轮询等待任务完成
                 if transcribe_response.status_code == HTTPStatus.OK:  # 成功状态

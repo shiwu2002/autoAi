@@ -283,9 +283,12 @@ class TaskHandler(BaseHTTPRequestHandler):
                 if not asr_result or not asr_result.get('success'):
                     error_msg = asr_result.get('error', 'ASR转写失败') if asr_result else 'ASR转写失败'
                     error_details = asr_result.get('details', '') if asr_result else ''
+                    logger.error(f"ASR failed: {error_msg}, details: {error_details}")
+                    logger.error(f"Full ASR result: {asr_result}")
                     self._send_response(500, {
                         'error': error_msg,
-                        'details': error_details
+                        'details': error_details,
+                        'full_result': str(asr_result)
                     })
                     return
                 
@@ -412,8 +415,8 @@ def parse_args():
     parser.add_argument(
         "--host",  # 定义--host参数
         type=str,  # 参数类型为字符串
-        default=os.getenv("HTTP_INTERFACE_HOST", http_config.get("host", "localhost")),  # 默认值优先从环境变量，其次配置文件，最后'localhost'
-        help="Host to bind the HTTP server to"  # 帮助文本
+        default=os.getenv("HTTP_INTERFACE_HOST", http_config.get("host", "127.0.0.1")),  # 默认值优先从环境变量，其次配置文件，最后'127.0.0.1'
+        help="Host to bind the HTTP server to (use 0.0.0.0 to listen on all interfaces)"  # 帮助文本
     )
     parser.add_argument(
         "--port",  # 定义--port参数
@@ -429,7 +432,26 @@ def main():
     
     # 创建HTTP服务器
     server_address = (args.host, args.port)  # 绑定的地址与端口
-    httpd = HTTPServer(server_address, TaskHandler)  # 创建HTTPServer实例，指定请求处理类TaskHandler
+    
+    print(f"Trying to bind to {args.host}:{args.port}")
+    
+    try:
+        httpd = HTTPServer(server_address, TaskHandler)  # 创建HTTPServer实例，指定请求处理类TaskHandler
+    except OSError as e:
+        print(f"Failed to bind to {args.host}:{args.port} ({e})")
+        if args.host == "127.0.0.1":
+            print("Retrying with localhost...")
+            try:
+                server_address = ("localhost", args.port)
+                httpd = HTTPServer(server_address, TaskHandler)
+                print(f"Successfully bound to localhost:{args.port}")
+            except OSError:
+                print("Also failed with localhost, trying 0.0.0.0...")
+                server_address = ("0.0.0.0", args.port)
+                httpd = HTTPServer(server_address, TaskHandler)
+                print(f"Successfully bound to 0.0.0.0:{args.port}")
+        else:
+            raise e
     
     print(f"Starting HTTP server on {args.host}:{args.port}")  # 控制台输出服务器启动信息
     print(f"\nAvailable endpoints:")
@@ -449,8 +471,8 @@ def main():
         httpd.serve_forever()  # 启动服务器循环，阻塞式处理请求
     except KeyboardInterrupt:  # 捕获Ctrl+C中断
         print("\nShutting down server...")  # 打印关闭提示
-        httpd.shutdown()  # 优雅关闭服务器
-        print("Server stopped.")  # 打印停止提示
+        httpd.shutdown()  # 关闭服务器
+        sys.exit(0)  # 正常退出程序
 
 if __name__ == "__main__":  # 仅当脚本作为主程序运行时执行main
     main()  # 调用主函数，启动HTTP服务
